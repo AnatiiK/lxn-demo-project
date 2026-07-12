@@ -1,0 +1,13 @@
+# Python virtual environments - installed packages, not code
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# CDK synthesized output - regenerated on every synth, not source
+**/cdk.out/
+
+# Node dependencies
+node_modules/
+
+# OS files
+.DS_Store

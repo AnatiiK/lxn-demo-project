@@ -7,6 +7,7 @@ from stacks.compute_stack import ComputeStack
 from stacks.guardduty_stack import GuardDutyStack
 from stacks.cloudtrail_stack import CloudTrailStack
 from stacks.observability_stack import ObservabilityStack
+from stacks.prod_compute_stack import ProdComputeStack
 from stacks.github_oidc_stack import GithubOidcStack
 
 app = cdk.App()
@@ -44,16 +45,36 @@ observability = ObservabilityStack(
 )
 observability.add_dependency(compute)
 
-# NOTE: replace "AnatiiK/lxn-demo-project" below with your actual GitHub
-# owner/repo once created in step 3 - must match exactly.
+prod_compute = ProdComputeStack(
+    app, "LxnDemo-ProdCompute",
+    vpc=network.vpc,
+    cluster=compute.cluster,
+    alb=compute.alb,
+    service_security_group=network.service_security_group,
+    kms_key=security.kms_key,
+    repository_uri=ecr_stack.repository.repository_uri,
+    data_bucket=compute.data_bucket,
+    env=env,
+)
+prod_compute.add_dependency(compute)
+prod_compute.add_dependency(security)
+prod_compute.add_dependency(ecr_stack)
+
 github_oidc = GithubOidcStack(
     app, "LxnDemo-GithubOidc",
     github_repo="AnatiiK/lxn-demo-project",
     ecr_repository_arn=ecr_stack.repository.repository_arn,
     ecs_service_arn=compute.service.service_arn,
+    prod_ecs_service_arn=prod_compute.service.service_arn,
+    prod_execution_role_arn=prod_compute.execution_role.role_arn,
+    prod_task_role_arn=prod_compute.task_role.role_arn,
+    prod_codedeploy_application_arn=prod_compute.codedeploy_application.application_arn,
+    prod_codedeploy_deployment_group_arn=prod_compute.deployment_group.deployment_group_arn,
+    prod_sns_topic_arn=prod_compute.deploy_alerts_topic.topic_arn,
     env=env,
 )
 github_oidc.add_dependency(ecr_stack)
 github_oidc.add_dependency(compute)
+github_oidc.add_dependency(prod_compute)
 
 app.synth()

@@ -43,7 +43,8 @@ class NetworkStack(Stack):
             allow_all_outbound=True,
         )
         self.alb_security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP from internet"
+            ec2.Peer.any_ipv4(), ec2.Port.tcp(8080),
+            "Prod HTTP - demo shares one ALB across environments; real prod would use a separate ALB/domain"
         )
         self.alb_security_group.add_ingress_rule(
             ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "HTTPS from internet"

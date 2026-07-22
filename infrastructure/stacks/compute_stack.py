@@ -96,7 +96,8 @@ class ComputeStack(Stack):
         )
 
         # --- ECS cluster + Fargate service ---
-        cluster = ecs.Cluster(self, "Cluster", vpc=vpc, container_insights=True)
+        self.cluster = ecs.Cluster(self, "Cluster", vpc=vpc, container_insights=True)
+        cluster = self.cluster
 
         task_def = ecs.FargateTaskDefinition(
     self,

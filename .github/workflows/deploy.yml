@@ -7,18 +7,19 @@ on:
       - 'app/**'
 
 permissions:
-  id-token: write   # required for OIDC - this is what lets GitHub request a token, no stored secret needed
+  id-token: write
   contents: read
 
 env:
   AWS_REGION: eu-west-1
   ECR_REPOSITORY: lxn-demo-app
-  ECS_CLUSTER: LxnDemo-Compute-ClusterEB0386A7-TQudU7Szuw4g
-  ECS_SERVICE: LxnDemo-Compute-ServiceD69D759B-cpZwCLZHH0dn
+  ROLE_ARN: arn:aws:iam::878076318223:role/LxnDemo-GithubOidc-GithubActionsRoleF5CC769F-17DAqtYIznqa
 
 jobs:
-  build-and-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +27,7 @@ jobs:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::878076318223:role/LxnDemo-GithubOidc-GithubActionsRoleF5CC769F-17DAqtYIznqa
+          role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR
@@ -36,10 +37,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Building for arm64 explicitly, matching the ECS task's runtime
-      # platform (Graviton) - a plain `docker build` on ubuntu-latest
-      # runners defaults to x86_64, which is exactly the architecture
-      # mismatch bug already hit once locally. Handling it here proactively.
       - name: Build and push image (arm64)
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -51,10 +48,93 @@ jobs:
             --push \
             ./app
 
-      - name: Force new ECS deployment
+  deploy-dev:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    env:
+      ECS_CLUSTER: LxnDemo-Compute-ClusterEB0386A7-TQudU7Szuw4g
+      ECS_SERVICE: LxnDemo-Compute-ServiceD69D759B-cpZwCLZHH0dn
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force new Dev ECS deployment
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
             --force-new-deployment \
+            --region $AWS_REGION
+
+      - name: Wait for Dev service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
+
+      - name: Notify approver that Dev passed and Prod deploy is pending approval
+        run: |
+          aws sns publish \
+            --topic-arn "${{ secrets.PROD_SNS_TOPIC_ARN }}" \
+            --subject "Dev deploy succeeded - Prod deployment awaiting your approval" \
+            --message "Commit ${{ github.sha }} passed Dev and is ready to promote to Prod. Review and approve at: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --region $AWS_REGION
+
+  deploy-prod:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      ECS_CLUSTER: LxnDemo-Compute-ClusterEB0386A7-TQudU7Szuw4g
+      PROD_ECS_SERVICE: LxnDemo-ProdCompute-ProdService7FC7ABE1-nAzafLNTTPaL
+      PROD_TASK_DEF_FAMILY: LxnDemoProdComputeProdTaskDef73297B93
+      CODEDEPLOY_APP: LxnDemo-ProdCompute-ProdCodeDeployApp723479FA-x08IRIXa01JY
+      CODEDEPLOY_DEPLOYMENT_GROUP: LxnDemo-ProdCompute-ProdDeploymentGroupCFD23F07-CGXAZqGbTi3Y
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current Prod task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition $PROD_TASK_DEF_FAMILY \
+            --region $AWS_REGION \
+            --query "taskDefinition" \
+            --output json > task-definition.json
+
+      - name: Render new image into the task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: AppContainer
+          image: 878076318223.dkr.ecr.eu-west-1.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image-tag }}
+
+      - name: Deploy to Prod via CodeDeploy (blue/green)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.PROD_ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          codedeploy-appspec: appspec.yaml
+          codedeploy-application: ${{ env.CODEDEPLOY_APP }}
+          codedeploy-deployment-group: ${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }}
+
+      - name: Notify on Prod deployment failure
+        if: failure()
+        run: |
+          aws sns publish \
+            --topic-arn "${{ secrets.PROD_SNS_TOPIC_ARN }}" \
+            --subject "Prod deployment FAILED" \
+            --message "Commit ${{ github.sha }} failed to deploy to Prod. Check the Actions run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --region $AWS_REGION

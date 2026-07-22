@@ -19,3 +19,4 @@ def index():
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
 # CI/CD pipeline test: verifying Prod blue/green + approval gate
+# Fix: deploy-prod needs build-and-push output directly
